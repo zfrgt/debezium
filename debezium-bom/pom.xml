@@ -167,6 +167,13 @@
                 <version>${version.postgresql.driver}</version>
             </dependency>
 
+            <!-- Apache Beam Java Core SDK -->
+            <dependency>
+                <groupId>org.apache.beam</groupId>
+                <artifactId>beam-sdks-java-core</artifactId>
+                <version>${version.beam.java.core.sdk}</version>
+            </dependency>
+
             <!--Make sure this version is compatible with the Protbuf-C version used on the server -->
             <dependency>
                 <groupId>com.google.protobuf</groupId>

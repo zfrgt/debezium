@@ -10,7 +10,8 @@ import org.apache.kafka.connect.source.SourceRecord;
 import io.debezium.engine.ChangeEvent;
 import io.debezium.engine.RecordChangeEvent;
 
-class EmbeddedEngineChangeEvent<K, V> implements ChangeEvent<K, V>, RecordChangeEvent<V> {
+// without exposing this directly, there's seemingly no way to properly execute the Google DataCatalog stuff
+public class EmbeddedEngineChangeEvent<K, V> implements ChangeEvent<K, V>, RecordChangeEvent<V> {
 
     private final K key;
     private final V value;

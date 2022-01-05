@@ -13,23 +13,34 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
-/**
- * Adapted from https://github.com/GoogleCloudPlatform/DataflowTemplates/tree/main/v2/cdc-parent#deploying-the-connector
+/*
+Adapted from https://github.com/GoogleCloudPlatform/DataflowTemplates/tree/main/v2/cdc-parent/cdc-common
  */
 package io.debezium.server.datacatalog;
 
 import com.google.api.gax.rpc.AlreadyExistsException;
 import com.google.api.gax.rpc.ApiException;
-import com.google.cloud.datacatalog.v1.*;
-import org.apache.beam.sdk.schemas.Schema;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import com.google.api.pathtemplate.PathTemplate;
+import com.google.cloud.datacatalog.v1.EntryGroupName;
+import com.google.cloud.datacatalog.v1.CreateEntryGroupRequest;
+import com.google.cloud.datacatalog.v1.CreateEntryRequest;
+import com.google.cloud.datacatalog.v1.DataCatalogClient;
+import com.google.cloud.datacatalog.v1.Entry;
+import com.google.cloud.datacatalog.v1.EntryGroup;
+import com.google.cloud.datacatalog.v1.ListEntriesRequest;
+import com.google.cloud.datacatalog.v1.ListEntriesResponse;
+import com.google.cloud.datacatalog.v1.LocationName;
+import com.google.cloud.datacatalog.v1.LookupEntryRequest;
+import com.google.cloud.datacatalog.v1.UpdateEntryRequest;
+import com.google.common.base.Strings;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.apache.beam.sdk.schemas.Schema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Class with utilities to communicate with Google Cloud Data Catalog. */
 public class DataCatalogSchemaUtils {
@@ -82,15 +93,20 @@ public class DataCatalogSchemaUtils {
             return null;
         }
 
-        EntryGroupName entryGroupName = EntryGroupName.of(gcpProject, DEFAULT_LOCATION, entryGroupId);
+        String formattedParent = formatEntryGroupName(gcpProject, DEFAULT_LOCATION, entryGroupId);
 
         List<Entry> entries = new ArrayList<>();
-        DataCatalogClient.ListEntriesPagedResponse response = client.listEntries(entryGroupName);
-        response.iterateAll().forEach(
-                entry -> {
-                    LOG.debug("Got entry [{}] from DataCatalog", entry.toString());
-                    entries.add(entry);
-                });
+        ListEntriesRequest request = ListEntriesRequest.newBuilder().setParent(formattedParent).build();
+        while (true) {
+            ListEntriesResponse response = client.listEntriesCallable().call(request);
+            entries.addAll(response.getEntriesList());
+            String nextPageToken = response.getNextPageToken();
+            if (!Strings.isNullOrEmpty(nextPageToken)) {
+                request = request.toBuilder().setPageToken(nextPageToken).build();
+            } else {
+                break;
+            }
+        }
 
         LOG.debug("Fetched entries: {}", entries);
 
@@ -280,7 +296,7 @@ public class DataCatalogSchemaUtils {
 
         @Override
         public String getPubSubTopicForTable(String tableName) {
-            return String.format("%s%s", pubsubTopicPrefix, tableName);
+            return String.format("%s_%s", pubsubTopicPrefix, tableName);
         }
 
         public Entry updateSchemaForTable(String tableName, Schema beamSchema) {
@@ -307,5 +323,10 @@ public class DataCatalogSchemaUtils {
 
             return client.updateEntry(updateEntryRequest);
         }
+    }
+
+    private static String formatEntryGroupName(String project, String location, String entryGroup) {
+        final PathTemplate ENTRY_GROUP_PATH_TEMPLATE = PathTemplate.createWithoutUrlEncoding("projects/{project}/locations/{location}/entryGroups/{entry_group}");
+        return ENTRY_GROUP_PATH_TEMPLATE.instantiate("project", project, "location", location, "entry_group", entryGroup);
     }
 }

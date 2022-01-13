@@ -37,7 +37,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
+
+import org.apache.beam.repackaged.core.org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.beam.sdk.schemas.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,7 +50,6 @@ import org.slf4j.LoggerFactory;
 public class DataCatalogSchemaUtils {
 
     // TODO(pabloem)(#138): Avoid using a default location for schema catalog entities.
-    public static final String DEFAULT_LOCATION = "us-central1";
 
     /** Template for the URI of a Pub/Sub topic {@link Entry} in Data Catalog. */
     private static final String DATA_CATALOG_PUBSUB_URI_TEMPLATE =
@@ -65,9 +68,9 @@ public class DataCatalogSchemaUtils {
     }
 
     /** Build a {@link DataCatalogSchemaManager} given certain parameters. */
-    public static DataCatalogSchemaManager getSchemaManager(
-            String gcpProject, String pubsubTopicPrefix, Boolean singleTopic) {
-        return getSchemaManager(gcpProject, pubsubTopicPrefix, DEFAULT_LOCATION, singleTopic);
+    public static DataCatalogSchemaManager getSchemaMgr(
+            String gcpProject, String pubsubTopicPrefix, String region, Boolean singleTopic) {
+        return getSchemaManager(gcpProject, pubsubTopicPrefix, region, singleTopic);
     }
 
     /** Build a {@link DataCatalogSchemaManager} given certain parameters. */
@@ -81,8 +84,7 @@ public class DataCatalogSchemaUtils {
     }
 
     /** Retrieve all of the {@link Schema}s associated to {@link Entry}s in an {@link EntryGroup}. */
-    public static Map<String, Schema> getSchemasForEntryGroup(
-            String gcpProject, String entryGroupId) {
+    public static Map<String, Schema> getSchemasForEntryGroup(String gcpProject, String region, String entryGroupId) {
         DataCatalogClient client = null;
         try {
             client = DataCatalogClient.create();
@@ -90,10 +92,10 @@ public class DataCatalogSchemaUtils {
             throw new RuntimeException("Unable to create a DataCatalogClient", e);
         }
         if (client == null) {
-            return null;
+            throw new IllegalArgumentException("Client is still null, check Data Catalog API logs and usage.");
         }
 
-        String formattedParent = formatEntryGroupName(gcpProject, DEFAULT_LOCATION, entryGroupId);
+        String formattedParent = formatEntryGroupName(gcpProject, region, entryGroupId);
 
         List<Entry> entries = new ArrayList<>();
         ListEntriesRequest request = ListEntriesRequest.newBuilder().setParent(formattedParent).build();
@@ -150,11 +152,9 @@ public class DataCatalogSchemaUtils {
                 LookupEntryRequest.newBuilder().setLinkedResource(linkedResource).build();
 
         try {
-            Entry entry = client.lookupEntry(request);
-            return entry;
+            return client.lookupEntry(request);
         } catch (ApiException e) {
-            System.out.println("CANT LOOKUP ENTRY" + e.toString());
-            e.printStackTrace();
+            LOG.error("Can't lookup entry via request {}", request);
             LOG.error("ApiException thrown by Data Catalog API:", e);
             return null;
         }
@@ -173,6 +173,8 @@ public class DataCatalogSchemaUtils {
         public abstract String getPubSubTopicForTable(String tableName);
 
         public abstract Entry updateSchemaForTable(String tableName, Schema beamSchema);
+
+        public abstract ImmutablePair<Entry, Schema> lookupSchemaEntryForTable(String tableName);
 
         public String getGcpProject() {
             return gcpProject;
@@ -197,12 +199,15 @@ public class DataCatalogSchemaUtils {
     }
 
     static class SingleTopicSchemaManager extends DataCatalogSchemaManager {
+        private final ConcurrentMap<String, ImmutablePair<Entry, Schema>> dcCache;
+
         private final String pubsubTopic;
         private Boolean entryGroupCreated = false;
 
         SingleTopicSchemaManager(String gcpProject, String location, String pubsubTopic) {
             super(gcpProject, location);
             this.pubsubTopic = pubsubTopic;
+            this.dcCache = new ConcurrentHashMap<>();
             createEntryGroup();
         }
 
@@ -251,9 +256,20 @@ public class DataCatalogSchemaUtils {
 
         @Override
         public Entry updateSchemaForTable(String tableName, Schema beamSchema) {
+            ImmutablePair<Entry, Schema> possiblyCached = this.lookupSchemaEntryForTable(tableName);
+            if (possiblyCached != null && possiblyCached.right.equals(beamSchema)) {
+                LOG.debug("Returning cached Data Catalog entry and schema.");
+                return possiblyCached.left;
+            } else {
+                LOG.info("Beam schema for table name {} has changed since the last time, " +
+                        "modifying it and putting to cache/DataCatalog.", tableName);
+            }
+
+            // otherwise, let's create a new one and put it into the cache
             LOG.debug("Converting Beam schema {} into a Data Catalog schema", beamSchema);
             com.google.cloud.datacatalog.v1.Schema newEntrySchema = SchemaUtils.fromBeamSchema(beamSchema);
-            LOG.info("Beam schema {} converted to Data Catalog schema {}", beamSchema, newEntrySchema);
+
+            LOG.debug("Beam schema {} converted to Data Catalog schema {}", beamSchema, newEntrySchema);
             LOG.error(
                     "Entry group name: {}",
                     EntryGroupName.of(getGcpProject(), location, entryGroupNameForTopic(pubsubTopic))
@@ -274,24 +290,35 @@ public class DataCatalogSchemaUtils {
                                             .build())
                             .build();
 
-            LOG.info("CreateEntryRequest: {}", createEntryRequest.toString());
+            LOG.info("CreateEntryRequest: {}", createEntryRequest);
 
             try {
-                return client.createEntry(createEntryRequest);
+                Entry resultingEntry = client.createEntry(createEntryRequest);
+                dcCache.put(tableName, new ImmutablePair<>(resultingEntry, beamSchema));
+                return resultingEntry;
             } catch (AlreadyExistsException e) {
                 // The Entry already exists. No further action is necessary.
+                LOG.warn("Schema for table name {} already exists, ignoring the exception.", tableName, e);
                 return createEntryRequest.getEntry();
             }
+        }
+
+        @Override
+        public ImmutablePair<Entry, Schema> lookupSchemaEntryForTable(String tableName) {
+            return dcCache.get(tableName);
         }
     }
 
     static class MultiTopicSchemaManager extends DataCatalogSchemaManager {
 
         private final String pubsubTopicPrefix;
+        private final ConcurrentMap<String, ImmutablePair<Entry, Schema>> dcCache;
 
         MultiTopicSchemaManager(String gcpProject, String location, String pubsubTopicPrefix) {
             super(gcpProject, location);
+            setupDataCatalogClient();
             this.pubsubTopicPrefix = pubsubTopicPrefix;
+            this.dcCache = new ConcurrentHashMap<>();
         }
 
         @Override
@@ -300,18 +327,25 @@ public class DataCatalogSchemaUtils {
         }
 
         public Entry updateSchemaForTable(String tableName, Schema beamSchema) {
-            setupDataCatalogClient();
             if (client == null) {
-                return null; // TODO(pabloem) Handle a missing client
+                throw new IllegalArgumentException("Data Catalog client is not ready, please check the cfg/logs.");
             }
-
             String pubsubTopic = getPubSubTopicForTable(tableName);
 
+            ImmutablePair<Entry, Schema> beforeLookupEntry = dcCache.get(tableName);
+            if (beforeLookupEntry != null) {
+                if (beforeLookupEntry.right == beamSchema) {
+                    LOG.trace("Returning entry from cache, it's similar to what we already have.");
+                    return beforeLookupEntry.left;
+                }
+            }
+
+            // otherwise, do the lookup stuff and proceed
             Entry beforeChangeEntry = lookupPubSubEntry(client, pubsubTopic, this.gcpProject);
             if (beforeChangeEntry == null) {
-                return null; // TODO(pabloem) Handle a failed entry lookup
+                throw new IllegalArgumentException("Entry is null, most probably debezium-server is down");
             }
-            LOG.info("Converting Beam schema {} into a Data Catalog schema", beamSchema);
+            LOG.debug("Converting Beam schema {} into a Data Catalog schema", beamSchema);
             com.google.cloud.datacatalog.v1.Schema newEntrySchema = SchemaUtils.fromBeamSchema(beamSchema);
             LOG.debug("Beam schema {} converted to Data Catalog schema {}", beamSchema, newEntrySchema);
 
@@ -321,7 +355,14 @@ public class DataCatalogSchemaUtils {
                             .setEntry(beforeChangeEntry.toBuilder().setSchema(newEntrySchema).build())
                             .build();
 
-            return client.updateEntry(updateEntryRequest);
+            Entry resultingEntry = client.updateEntry(updateEntryRequest);
+            dcCache.put(tableName, new ImmutablePair<>(resultingEntry, beamSchema));
+            return resultingEntry;
+        }
+
+        @Override
+        public ImmutablePair<Entry, Schema> lookupSchemaEntryForTable(String tableName) {
+            return dcCache.get(tableName);
         }
     }
 

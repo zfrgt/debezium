@@ -63,6 +63,7 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
 
     private static final String PROP_PREFIX = "debezium.sink.pubsub.";
     private static final String PROP_PROJECT_ID = PROP_PREFIX + "project.id";
+    private static final String PROP_PROJECT_REGION = PROP_PREFIX + "project.region";
 
     public interface PublisherBuilder {
         Publisher get(ProjectTopicName topicName);
@@ -88,6 +89,9 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
     @ConfigProperty(name = PROP_PREFIX + "null.key", defaultValue = "default")
     String nullKey;
 
+    @ConfigProperty(name = PROP_PROJECT_REGION, defaultValue = "us-west1")
+    String region;
+
     @Inject
     @CustomConsumerBuilder
     Instance<PublisherBuilder> customPublisherBuilder;
@@ -105,7 +109,7 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
 
         // default mode is multi-topic, bc it's better to run multiple topic-aware DataCatalog schema updater with
         // a single topic inside than vice versa.
-        schemaUpdater = DataCatalogSchemaUtils.getSchemaManager(projectId, pubsubTopicPrefix, false);
+        schemaUpdater = DataCatalogSchemaUtils.getSchemaManager(projectId, pubsubTopicPrefix, region, false);
         LOGGER.info("Initialized Data Catalog API usage, used prefix {} for PubSub topics", pubsubTopicPrefix);
 
         publisherBuilder = (t) -> {
@@ -163,12 +167,6 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
                 }
             }
 
-//            if (record.value() instanceof String) {
-//                pubsubMessage.setData(ByteString.copyFromUtf8((String) record.value()));
-//            } else if (record.value() instanceof byte[]) {
-//                pubsubMessage.setData(ByteString.copyFrom((byte[]) record.value()));
-//            }
-
             // only thing we apparently support for now is EmbeddedEngineChangeEvent...
             EmbeddedEngineChangeEvent<Object, Object> embeddedChangeEvent = (EmbeddedEngineChangeEvent<Object, Object>) record;
 
@@ -179,6 +177,7 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
             if (updateRecord == null) {
                 continue;
             } else {
+                // disregard name, it's caching the results if necessary and will return these instead of doing API call
                 Entry result = schemaUpdater.updateSchemaForTable(record.destination(), updateRecord.getSchema());
                 if (result == null) {
                     throw new InterruptedException(

@@ -62,6 +62,8 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
     private static final Logger LOGGER = LoggerFactory.getLogger(PubSubChangeConsumer.class);
 
     private static final String PROP_PREFIX = "debezium.sink.pubsub.";
+     private static final String PROP_MODE = PROP_PREFIX + "mode";
+    private static final String PROP_TOPIC = PROP_PREFIX + "topic";
     private static final String PROP_PROJECT_ID = PROP_PREFIX + "project.id";
     private static final String PROP_PROJECT_REGION = PROP_PREFIX + "project.region";
 
@@ -86,6 +88,12 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
     @ConfigProperty(name = PROP_PREFIX + "pubsub.topic.prefix")
     String pubsubTopicPrefix;
 
+    @ConfigProperty(name = PROP_MODE)
+    String pubsubMode;
+
+    @ConfigProperty(name = PROP_TOPIC)
+    String pubsubTopic;
+
     @ConfigProperty(name = PROP_PREFIX + "null.key", defaultValue = "default")
     String nullKey;
 
@@ -109,7 +117,14 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
 
         // default mode is multi-topic, bc it's better to run multiple topic-aware DataCatalog schema updater with
         // a single topic inside than vice versa.
-        schemaUpdater = DataCatalogSchemaUtils.getSchemaManager(projectId, pubsubTopicPrefix, region, false);
+        if (pubsubTopicPrefix != null && pubsubMode.equalsIgnoreCase("multi")) {
+            // multi-topic
+            schemaUpdater = DataCatalogSchemaUtils.getSchemaManager(projectId, pubsubTopicPrefix, pubsubTopic, region, false);
+        } else {
+            // single-topic
+            schemaUpdater = DataCatalogSchemaUtils.getSchemaManager(projectId, pubsubTopicPrefix, pubsubTopic, region, true);
+        }
+
         LOGGER.info("Initialized Data Catalog API usage, used prefix {} for PubSub topics", pubsubTopicPrefix);
 
         publisherBuilder = (t) -> {

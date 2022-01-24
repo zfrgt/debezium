@@ -35,6 +35,7 @@ import com.google.cloud.datacatalog.v1.UpdateEntryRequest;
 import com.google.common.base.Strings;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,6 +44,7 @@ import java.util.stream.Collectors;
 
 import org.apache.beam.repackaged.core.org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.beam.sdk.schemas.Schema;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,26 +60,30 @@ public class DataCatalogSchemaUtils {
     private static final Logger LOG = LoggerFactory.getLogger(DataCatalogSchemaUtils.class);
 
     /**
-     * Builds an {@link EntryGroup} name for a particular pubsubTopic.
+     * Builds an {@link EntryGroup} name for a particular pubsubTopic, which will comply to all rules enforced by G.
      *
      * <p>This method is intended for use in single-topic mode, where an {@link EntryGroup} with
      * multiple {@link Entry}s is created for a single Pub/Sub topic.
      */
     public static String entryGroupNameForTopic(String pubsubTopic) {
-        return String.format("cdc_%s", pubsubTopic);
+        int topicNameLength = pubsubTopic.length();
+        return pubsubTopic
+                .replaceAll("\\.", "_")
+                .replaceAll("-", "_")
+                .substring(0, Integer.min(topicNameLength, 63));
     }
 
     /** Build a {@link DataCatalogSchemaManager} given certain parameters. */
     public static DataCatalogSchemaManager getSchemaMgr(
-            String gcpProject, String pubsubTopicPrefix, String region, Boolean singleTopic) {
-        return getSchemaManager(gcpProject, pubsubTopicPrefix, region, singleTopic);
+            String gcpProject, String pubsubTopicPrefix, String exactTopic, String region, Boolean singleTopic) {
+        return getSchemaManager(gcpProject, pubsubTopicPrefix, exactTopic, region, singleTopic);
     }
 
     /** Build a {@link DataCatalogSchemaManager} given certain parameters. */
     public static DataCatalogSchemaManager getSchemaManager(
-            String gcpProject, String pubsubTopicPrefix, String location, Boolean singleTopic) {
-        if (singleTopic) {
-            return new SingleTopicSchemaManager(gcpProject, location, pubsubTopicPrefix);
+            String gcpProject, String pubsubTopicPrefix, String exactTopic, String location, Boolean singleTopic) {
+        if (singleTopic && exactTopic != null) {
+            return new SingleTopicSchemaManager(gcpProject, location, exactTopic);
         } else {
             return new MultiTopicSchemaManager(gcpProject, location, pubsubTopicPrefix);
         }
@@ -146,7 +152,7 @@ public class DataCatalogSchemaUtils {
         String linkedResource =
                 String.format(DATA_CATALOG_PUBSUB_URI_TEMPLATE, gcpProject, pubsubTopic);
 
-        LOG.info("Looking up LinkedResource {}", linkedResource);
+        LOG.debug("Looking up LinkedResource {}", linkedResource);
 
         LookupEntryRequest request =
                 LookupEntryRequest.newBuilder().setLinkedResource(linkedResource).build();
@@ -200,25 +206,49 @@ public class DataCatalogSchemaUtils {
 
     static class SingleTopicSchemaManager extends DataCatalogSchemaManager {
         private final ConcurrentMap<String, ImmutablePair<Entry, Schema>> dcCache;
+        private final EntryGroup entryGroup;
 
         private final String pubsubTopic;
         private Boolean entryGroupCreated = false;
 
         SingleTopicSchemaManager(String gcpProject, String location, String pubsubTopic) {
             super(gcpProject, location);
+            setupDataCatalogClient();
             this.pubsubTopic = pubsubTopic;
             this.dcCache = new ConcurrentHashMap<>();
-            createEntryGroup();
+            this.entryGroup = createEntryGroup();
+            initialize(this.dcCache, client, location);
         }
 
-        private void createEntryGroup() {
-            if (this.entryGroupCreated) {
-                return;
+        private void initialize(ConcurrentMap<String, ImmutablePair<Entry, Schema>> dcCache, DataCatalogClient client, String location) {
+            // fill in the values already present on the DataCatalog side
+            List<Entry> entries = new ArrayList<>();
+            String formattedParent = formatEntryGroupName(gcpProject, location, entryGroupNameForTopic(pubsubTopic));
+            ListEntriesRequest request = ListEntriesRequest.newBuilder().setParent(formattedParent).build();
+            while (true) {
+                ListEntriesResponse response = client.listEntriesCallable().call(request);
+                entries.addAll(response.getEntriesList());
+                String nextPageToken = response.getNextPageToken();
+                if (!Strings.isNullOrEmpty(nextPageToken)) {
+                    request = request.toBuilder().setPageToken(nextPageToken).build();
+                } else {
+                    break;
+                }
             }
-            setupDataCatalogClient();
+
+            LOG.debug("Fetched entries: {}, caching them all", entries);
+            entries.forEach(entry -> {
+                dcCache.put(entry.getDescription(), new ImmutablePair<>(entry, SchemaUtils.toBeamSchema(entry.getSchema())));
+            });
+        }
+
+        private EntryGroup createEntryGroup() {
+            if (this.entryGroupCreated) {
+                return this.entryGroup;
+            }
             EntryGroup entryGroup =
                     EntryGroup.newBuilder()
-                            .setDisplayName(String.format("CDC_Debezium_on_Dataflow_%s", pubsubTopic))
+                            .setDisplayName(String.format("CDC_Debezium_on_Dataflow_%s", entryGroupNameForTopic(pubsubTopic)))
                             .setDescription(
                                     "This EntryGroup represents a set of change streams from tables "
                                             + "being replicated for CDC.")
@@ -233,13 +263,14 @@ public class DataCatalogSchemaUtils {
                             .build();
 
             try {
-                LOG.info("Creating EntryGroup {}", entryGroupRequest);
+                LOG.debug("Creating EntryGroup {}", entryGroupRequest);
                 EntryGroup createdEntryGroup = client.createEntryGroup(entryGroupRequest);
-                LOG.info("Created EntryGroup: {}", createdEntryGroup.toString());
-
+                LOG.debug("Created EntryGroup: {}, caching it", createdEntryGroup.toString());
                 this.entryGroupCreated = true;
+                return createdEntryGroup;
             } catch (AlreadyExistsException e) {
                 // EntryGroup already exists. There is no further action needed.
+                return entryGroup;
             }
         }
 
@@ -256,13 +287,24 @@ public class DataCatalogSchemaUtils {
 
         @Override
         public Entry updateSchemaForTable(String tableName, Schema beamSchema) {
+            LOG.debug("Looking up schema for table {}", tableName);
             ImmutablePair<Entry, Schema> possiblyCached = this.lookupSchemaEntryForTable(tableName);
-            if (possiblyCached != null && possiblyCached.right.equals(beamSchema)) {
-                LOG.debug("Returning cached Data Catalog entry and schema.");
+            LOG.debug("Got following: {}", possiblyCached);
+            if (possiblyCached != null) {
+                LOG.debug("left {}", possiblyCached.left);
+                LOG.debug("right {}", possiblyCached.right);
+            }
+
+            if (possiblyCached != null && sameFields(possiblyCached.right, beamSchema)) {
+                LOG.debug("Returning cached Data Catalog entry and schema, fields are the same there.");
                 return possiblyCached.left;
             } else {
-                LOG.info("Beam schema for table name {} has changed since the last time, " +
-                        "modifying it and putting to cache/DataCatalog.", tableName);
+                LOG.warn("Beam Schema in the request: {}", beamSchema);
+                if (possiblyCached != null) {
+                    LOG.warn("Beam Schema in the cache: {}, they don't match.", possiblyCached.right);
+                    LOG.debug("Beam schema for table name {} has changed since the last time, " +
+                            "modifying it and putting to cache/DataCatalog.", tableName);
+                }
             }
 
             // otherwise, let's create a new one and put it into the cache
@@ -290,7 +332,7 @@ public class DataCatalogSchemaUtils {
                                             .build())
                             .build();
 
-            LOG.info("CreateEntryRequest: {}", createEntryRequest);
+            LOG.debug("CreateEntryRequest: {}", createEntryRequest);
 
             try {
                 Entry resultingEntry = client.createEntry(createEntryRequest);
@@ -301,6 +343,14 @@ public class DataCatalogSchemaUtils {
                 LOG.warn("Schema for table name {} already exists, ignoring the exception.", tableName, e);
                 return createEntryRequest.getEntry();
             }
+        }
+
+        private boolean sameFields(Schema right, Schema left) {
+            List<String> rFieldNames = right.getFieldNames();
+            List<String> lFieldNames = left.getFieldNames();
+            Collections.sort(rFieldNames);
+            Collections.sort(lFieldNames);
+            return rFieldNames.equals(lFieldNames);
         }
 
         @Override
@@ -349,7 +399,7 @@ public class DataCatalogSchemaUtils {
             com.google.cloud.datacatalog.v1.Schema newEntrySchema = SchemaUtils.fromBeamSchema(beamSchema);
             LOG.debug("Beam schema {} converted to Data Catalog schema {}", beamSchema, newEntrySchema);
 
-            LOG.info("Publishing schema for table {} corresponding to topic {}", tableName, pubsubTopic);
+            LOG.debug("Publishing schema for table {} corresponding to topic {}", tableName, pubsubTopic);
             UpdateEntryRequest updateEntryRequest =
                     UpdateEntryRequest.newBuilder()
                             .setEntry(beforeChangeEntry.toBuilder().setSchema(newEntrySchema).build())

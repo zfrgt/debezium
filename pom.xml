@@ -115,7 +115,7 @@
         <!-- Quarkus -->
         <quarkus.version>2.5.0.Final</quarkus.version>
         <!-- Beam SDK, used for DataCatalog schema mgmt -->
-        <version.beam.java.core.sdk>2.35.0</version.beam.java.core.sdk>
+        <version.beam.java.core.sdk>2.34.0</version.beam.java.core.sdk>
 
         <!-- Database drivers, should align with databases -->
         <version.postgresql.driver>42.2.24</version.postgresql.driver>

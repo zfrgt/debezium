@@ -77,7 +77,10 @@ public final class DbzToBeamTranslator {
         LOG.trace("DBZ entry, after section [{}]", afterValueRow);
 
         Row primaryKey = null;
-        if (record.key() != null) {
+        boolean hasPK = true;
+        if (record.key() == null) {
+            hasPK = false;
+        } else {
             primaryKey = handleValue(record.keySchema(), record.key());
             LOG.trace("Primary Key Schema: {} | Primary Key Value: {}", primaryKey.getSchema(), primaryKey);
         }
@@ -114,7 +117,7 @@ public final class DbzToBeamTranslator {
                         .addInt64Field(DataflowCdcRowFormat.TIMESTAMP_MS);
             }
 
-            if (primaryKey != null) {
+            if (hasPK) {
                 schemaBuilder.addRowField(DataflowCdcRowFormat.PRIMARY_KEY, primaryKey.getSchema());
             }
             knownSchemas.putIfAbsent(qualifiedTableName, schemaBuilder.build());
@@ -126,11 +129,10 @@ public final class DbzToBeamTranslator {
                 Row.withSchema(finalBeamSchema)
                         .addValue(operation)
                         .addValue(qualifiedTableName)
-                        .addValue(beforeValueRow)
                         .addValue(afterValueRow)
                         .addValue(timestampMs);
 
-        if (primaryKey != null) {
+        if (hasPK) {
             beamRowBuilder.addValue(primaryKey);
         }
 

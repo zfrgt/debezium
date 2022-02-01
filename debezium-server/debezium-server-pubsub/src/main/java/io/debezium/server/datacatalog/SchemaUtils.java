@@ -133,7 +133,7 @@ public class SchemaUtils {
             return columnBuilder.setColumn(beamField.getName()).setType(columnType).build();
         } else {
             String columnType = FIELD_TYPE_NAMES.inverse().get(beamField.getType().getTypeName());
-            LOG.warn("Row schema may be null or an unsupported one: [{}]", columnType);
+            LOG.debug("Row schema may be null or an unsupported one: [{}]", columnType);
             return columnBuilder.setColumn(beamField.getName()).setType(columnType).build();
         }
     }

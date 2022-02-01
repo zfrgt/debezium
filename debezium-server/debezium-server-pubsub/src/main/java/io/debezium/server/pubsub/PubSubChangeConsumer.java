@@ -85,7 +85,7 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
     @ConfigProperty(name = PROP_PREFIX_ORDERING_ENABLED, defaultValue = "true")
     boolean orderingEnabled;
 
-    @ConfigProperty(name = PROP_TOPIC_PREFIX)
+    @ConfigProperty(name = PROP_TOPIC_PREFIX, defaultValue = "dbz_cdc")
     String pubsubTopicPrefix;
 
     @ConfigProperty(name = PROP_MODE)

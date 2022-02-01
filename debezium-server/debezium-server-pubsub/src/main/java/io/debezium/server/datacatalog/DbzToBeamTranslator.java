@@ -137,7 +137,7 @@ public final class DbzToBeamTranslator {
         }
 
         Row result = beamRowBuilder.build();
-        LOG.trace("Built Beam row: {}", result.toString(true));
+        LOG.trace("Built Beam row: [{}]", result);
         return result;
     }
 

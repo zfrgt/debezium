@@ -185,12 +185,16 @@ public class PubSubChangeConsumer extends BaseChangeConsumer implements Debezium
 
             try {
                 RowCoder recordCoder = rowCoderMap.computeIfAbsent(tableName, s -> RowCoder.of(updateRecord.getSchema()));
-                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-                recordCoder.encode(updateRecord, outputStream);
-
-                ByteString encodedUpdate = ByteString.copyFrom(outputStream.toByteArray());
-                PubsubMessage msg = pubsubMessage.setData(encodedUpdate).putAttributes("table", tableName).build();
-                deliveries.add(publisher.publish(msg));
+                if (recordCoder != null) {
+                    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+                    recordCoder.encode(updateRecord, outputStream);
+                    ByteString encodedUpdate = ByteString.copyFrom(outputStream.toByteArray());
+                    PubsubMessage msg = pubsubMessage.setData(encodedUpdate).putAttributes("table", tableName).build();
+                    deliveries.add(publisher.publish(msg));
+                } else {
+                    LOG.error("Unable to create RowCoder basing on row schema: {}", updateRecord.getSchema());
+                    return;
+                }
             } catch (IOException e) {
                 LOG.error("Caught exception {} when trying to encode record {}. Stopping processing.", e, updateRecord);
                 return;

@@ -290,8 +290,14 @@ public final class DbzToBeamTranslator {
     }
 
     private static Row kafkaSourceRecordToBeamRow(Struct value, Row.Builder rowBuilder) {
+        if (value != null) {
+            LOG.trace("Translating Kafka source record [{}] to Beam row", value);
+        } else {
+            LOG.trace("Kafka source record is null");
+            return null;
+        }
+
         org.apache.beam.sdk.schemas.Schema beamSchema = rowBuilder.getSchema();
-        LOG.trace("Translating Kafka source record [{}] to Beam row", value.toString());
 
         for (org.apache.beam.sdk.schemas.Schema.Field f : beamSchema.getFields()) {
             switch (f.getType().getTypeName()) {
